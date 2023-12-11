@@ -1,9 +1,11 @@
 import discord
-import pyaudio
 import time
 import sys
 import logging
 import json
+from PyAudioPCM import PyAudioPCM 
+from spotify_controler import Spotify_Controller
+from urllib.parse import urlparse
 
 try:
     with open('config.json') as f:
@@ -14,63 +16,55 @@ except:
     time.sleep(3)
     sys.exit()
 
-BOT_TOKEN = config["token"]
-OWNER_ID = config["owners_id"]
-DEFAULT_CHANNEL_ID = config["default_channel"]
-VOICE_CLIENT = None
+DISCORD_BOT_TOKEN = config["discord_token"]
+DISCORD_PREFIX = config["discord_prefix"]
 
-class PyAudioPCM(discord.AudioSource):
-    def __init__(self, channels=2, rate=48000, chunk=960) -> None:
-        p = pyaudio.PyAudio()
-        input_device = None
-        for i in range(p.get_device_count()):
-            device_info = p.get_device_info_by_index(i)
-            if "Virtual Audio Cable" in device_info['name'] and device_info["maxInputChannels"] == 2 and device_info["defaultSampleRate"] == 48000:
-                input_device = i
-                break
+SPOTIFY_CLIENT_ID = config["spotify_client_id"]
+SPOTIFY_CLIENT_SECRET = config["spotify_client_secret"]
+SPOTIFY_REDIRECT_URI = config["spotify_redirect_uri"]
 
-        if(not input_device):
-            print("[ERROR] Did not find the Virtual Audio Cable. Make sure it is installed.")
-            print("[ERROR] Closing the app...")
-            time.sleep(3)
-            sys.exit()
+WHITE_LIST = config["white_list"]
 
-        self.chunks = chunk
-        self.input_stream = p.open(format=pyaudio.paInt16, channels=channels, rate=rate, input=True, input_device_index=input_device, frames_per_buffer=chunk)
+global VOICE_CLIENT
+VOICE_CLIENT = None   
 
-    def read(self) -> bytes:
-        return self.input_stream.read(self.chunks)
-    
+BLUE = 0x00008B
+RED = 0xFF0000
+YELLOW = 0xD5B60A
 
+async def join_voice_channel(channel_id):
+    global VOICE_CLIENT
+    if(VOICE_CLIENT):
+        await VOICE_CLIENT.disconnect()
 
-async def join_voice_channel():
-    channel = get_owners_voice_channel()
+    channel = client.get_channel(channel_id)
     if(not channel):
-        print("[WARNING] Did not find the owner in any of the voice channels!")
-        print("[STATUS] Connecting to the default voice channel")
+        return False
 
-        channel = client.get_channel(DEFAULT_CHANNEL_ID)
-        if(not channel):
-            print("[ERROR] Default channel has not been found!")
-            print("[ERROR] Closing the app...")
-            time.sleep(3)
-            sys.exit()
 
-    voice_client = await channel.connect()
-    VOICE_CLIENT = voice_client
-    print("[STATUS] Successfully connected to the voice channel")
+    VOICE_CLIENT = await channel.connect()
+    start_transmitting(VOICE_CLIENT)
+    return True
+
+async def leave_channel():
+    global VOICE_CLIENT
+    if(VOICE_CLIENT and VOICE_CLIENT.is_connected()):
+        await VOICE_CLIENT.disconnect()
+        return True
+    
+    return False
+
+def start_transmitting(voice_client):
     voice_client.play(PyAudioPCM(), after=lambda e: print(f'Player error: {e}') if e else None)
-    print("[STATUS] Playing sound from the Virtual Audio Cable...")
 
-def get_owners_voice_channel():
-    for guild in client.guilds:
-        member = guild.get_member(OWNER_ID)
-        if(not member):
-            print("[WARNING] Did not find the owner or he does not exist")
-            return None
-        if(member.voice and member.voice.channel):
-            return member.voice.channel
-    return None
+
+async def send_embed(ctx, title, color):
+    embed = discord.Embed(
+        title=title,
+        color=color 
+    )
+
+    await ctx.channel.send(embed=embed)
 
 def disable_discord_logs():
     logging.basicConfig(level=logging.INFO)
@@ -85,14 +79,179 @@ def disable_discord_logs():
     discord_gateway_logger.setLevel(logging.WARNING)
     discord_voice_client_logger.setLevel(logging.WARNING)
 
+def is_valid_url(url):
+    try:
+        result = urlparse(url)
+        return all([result.scheme, result.netloc])
+    except ValueError:
+        return False
+
+#setup
 disable_discord_logs()
 intents = discord.Intents.all()
 intents.voice_states = True
-client = discord.Client(intents=intents)     
+client = discord.Client(intents=intents)  
+spotify_controller = Spotify_Controller(SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET, SPOTIFY_REDIRECT_URI) 
 
 @client.event
 async def on_ready():
     print("[STATUS] Successfully connected to the discord server")
-    await join_voice_channel()
+
+@client.event
+async def on_message(ctx):
+    if(ctx.author.id == client.user.id):
+        return
+
+    if(not ctx.content.startswith(DISCORD_PREFIX)):
+        return
     
-client.run(BOT_TOKEN)
+    if(len(WHITE_LIST) > 0 and ctx.author.id not in WHITE_LIST):
+        await send_embed(ctx,
+                            f"YOU HAVE NO CONTROL OVER ME! :smiling_imp:",
+                            BLUE)
+        return
+    
+    if(ctx.content.startswith(DISCORD_PREFIX + "join")):
+        if(ctx.author.voice):
+            await join_voice_channel(ctx.author.voice.channel.id)
+            await send_embed(ctx,
+                            f"Sucesfully connected to: {ctx.author.voice.channel.name}",
+                            BLUE)
+        else:
+            await send_embed(ctx,
+                            f"Sorry. I was unable to conenct to your voice channel.",
+                            RED)
+
+    if(ctx.content.startswith(DISCORD_PREFIX + "leave")):
+        if(await leave_channel()):
+            await send_embed(ctx,
+                                f"Sucesfully left the voice channel.",
+                                BLUE)
+        else:
+            await send_embed(ctx,
+                            f"I was not connected to any voice channel.",
+                            RED)
+
+    if(ctx.content.startswith(DISCORD_PREFIX + "play") and not ctx.content.startswith(DISCORD_PREFIX + "playlist")):
+        if(len(ctx.content.split()) < 2):
+            await send_embed(ctx,
+                            f"{DISCORD_PREFIX}play [Song Name]",
+                            YELLOW)
+            return
+        song_name = ""
+        for word in ctx.content.split()[1:]:
+            song_name += word + " "
+
+        song = spotify_controller.search_for_song(song_name)
+        if(song):
+            if(spotify_controller.is_playing()):
+                spotify_controller.add_to_queue(song)
+                await send_embed(ctx,
+                            f"Hey! I found the song! Let me put it to the queue. {spotify_controller.sp.track(song)['name']} by {spotify_controller.sp.track(song)['artists'][0]['name']}",
+                            BLUE)
+            else:
+                spotify_controller.play(song)
+                await send_embed(ctx,
+                            f"Hey! I found the song! Playing:{spotify_controller.sp.track(song)['name']} by {spotify_controller.sp.track(song)['artists'][0]['name']}",
+                            BLUE)
+
+            if(not VOICE_CLIENT or not VOICE_CLIENT.is_connected()):
+                await join_voice_channel(ctx.author.voice.channel.id)
+
+
+        else:
+            await send_embed(ctx,
+                            f"Sorry, I could not find the \"{song_name}\" song...",
+                            YELLOW)
+
+    if(ctx.content.startswith(DISCORD_PREFIX + "skip")):
+        current_track = spotify_controller.sp.current_playback()['item']['name']
+        spotify_controller.next_track()
+        time.sleep(1)
+        next_track = spotify_controller.sp.current_playback()['item']['name']
+        await send_embed(ctx,
+                            f"Skipped {current_track}. Now palying {next_track}",
+                            BLUE)
+
+    if(ctx.content.startswith(DISCORD_PREFIX + "previous")):
+        try:
+            spotify_controller.previous_track()
+            time.sleep(1)
+            next_track = spotify_controller.sp.current_playback()['item']['name']
+            await send_embed(ctx,
+                                f"Returned to {next_track}",
+                                BLUE)
+        except:
+            await send_embed(ctx,
+                                f"There were no previous tracks...",
+                                RED)
+
+    if(ctx.content.startswith(DISCORD_PREFIX + "pause")):
+        spotify_controller.pause()
+        await send_embed(ctx,
+                                f"Paused...",
+                                BLUE)
+    
+    if(ctx.content.startswith(DISCORD_PREFIX + "resume")):
+        spotify_controller.resume()
+        await send_embed(ctx,
+                                f"Resumed {spotify_controller.sp.current_playback()['item']['name']}",
+                                BLUE)
+
+    if(ctx.content.startswith(DISCORD_PREFIX + "clear")):
+        spotify_controller.clear_queue()
+        await send_embed(ctx,
+                                f"TO DO",
+                                YELLOW)
+
+    if(ctx.content.startswith(DISCORD_PREFIX + "volume")):
+        if(len(ctx.content.split()) != 2):
+            if(ctx.content.startswith(DISCORD_PREFIX + "clear")):
+                spotify_controller.clear_queue()
+                await send_embed(ctx,
+                                f"{DISCORD_PREFIX}volume [0-100]",
+                                YELLOW)
+            return
+        
+        volume_value = ctx.content.split()[1]
+        if(volume_value.isnumeric()):
+            spotify_controller.volume(max(min(int(volume_value), 100),0))
+            await send_embed(ctx,
+                                f"Volume changed to {volume_value}",
+                                BLUE)
+        else:
+            await send_embed(ctx,
+                                f"{DISCORD_PREFIX}volume [0-100]",
+                                YELLOW)
+
+    if(ctx.content.startswith(DISCORD_PREFIX + "playlist")):
+        if(len(ctx.content.split()) != 2):
+            await send_embed(ctx,
+                                f"{DISCORD_PREFIX}playlist [url]",
+                                YELLOW)
+            return
+        
+        spotify_controller.start_playlist(ctx.content.split()[1])
+        await send_embed(ctx,
+                                f"I found the playlist. Let me play it.",
+                                BLUE)
+        
+    if(ctx.content.startswith(DISCORD_PREFIX + "help")):
+            embed = discord.Embed(
+                    title="Commands",
+                    description=f"""{DISCORD_PREFIX}play [song name] 
+                                    {DISCORD_PREFIX}pause
+                                    {DISCORD_PREFIX}resume
+                                    {DISCORD_PREFIX}skip
+                                    {DISCORD_PREFIX}previous
+                                    {DISCORD_PREFIX}playlist [url]
+                                    {DISCORD_PREFIX}clear
+                                    {DISCORD_PREFIX}volume [0-100]
+                                    {DISCORD_PREFIX}help""",
+                color=BLUE)
+
+            await ctx.channel.send(embed=embed)
+        
+
+    
+client.run(DISCORD_BOT_TOKEN)
