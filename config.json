@@ -1,8 +1,0 @@
-{	
-	"discord_token": "ODc3ODgwOTg4MzY0MDQ2MzM2.GQjVH2.BfVlT7gnlen0OFg3LdZ389Szoa5Aub44U0lPxM",
-	"discord_prefix": ".",
-	"spotify_client_id":"38c73a486a8d49b5b7f1e1f18f866db7",
-	"spotify_client_secret": "83812692f8cf49b1981d5a48fcca51dc",
-	"spotify_redirect_uri": "http://localhost:8888/callback",
-	"white_list": [301401944243568642]
-}
